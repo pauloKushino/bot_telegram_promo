@@ -110,3 +110,42 @@ async def test_price_history_nao_incha_com_preco_repetido(session: AsyncSession)
     inseriu_novo = await repo.maybe_insert_price(session, product_id, Decimal("45.00"))
     await session.commit()
     assert inseriu_novo  # preço mudou: insere sempre
+
+
+# -------------------------------------------------------------- fase 2
+
+
+async def test_conversions_upsert_e_agregacao(session: AsyncSession):
+    """Dedup por (store, order_id) e agregações do relatório diário (PostgreSQL real)."""
+    start = NOW - timedelta(hours=1)
+    end = NOW + timedelta(hours=1)
+
+    nova = await repo.upsert_conversion(
+        session, store="shopee", sub_id="p1xabcd123", order_id="ORD-1",
+        commission=Decimal("3.50"), status="pending", occurred_at=NOW,
+    )
+    assert nova
+    # reimportação do mesmo pedido com status novo: atualiza, não duplica
+    atualizou = await repo.upsert_conversion(
+        session, store="shopee", sub_id="p1xabcd123", order_id="ORD-1",
+        commission=Decimal("3.50"), status="approved", occurred_at=NOW,
+    )
+    assert not atualizou
+    await session.commit()
+
+    convs = await repo.conversions_between(session, start, end)
+    assert len(convs) == 1
+    assert convs[0].status == "approved"
+    assert await repo.commission_sum_between(session, start, end) == Decimal("3.50")
+
+    # top de posts por comissão: amarra conversions.sub_id → post_queue
+    product_id = await _insert_product_with_history(session, [("39.90", 0)])
+    await repo.enqueue_post(
+        session, product_id=product_id, price_at_post=Decimal("39.90"), reference_price=None,
+        reason="teste", message_text="texto", affiliate_link="https://s.shopee.com.br/x",
+        sub_id="p1xabcd123",
+    )
+    await session.commit()
+    tops = await repo.top_posts_by_commission(session, start, end)
+    assert len(tops) == 1
+    assert tops[0][1] == Decimal("3.50")

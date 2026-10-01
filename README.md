@@ -23,9 +23,23 @@ Lojas (API)  →  │ collect → classify(IA) → deal engine │  a cada N min
                 └──────────────────────────────────────┘
 ```
 
-- **Loja (fase 1)**: Shopee Afiliados (GraphQL oficial, assinatura HMAC-SHA256). Mercado Livre e Amazon: fase 4.
+- **Loja**: Shopee Afiliados (GraphQL oficial, assinatura SHA256, validada contra a API real).
+  Mercado Livre e Amazon: fase 4.
 - **IA**: NVIDIA NIM (`https://integrate.api.nvidia.com/v1`, API compatível com OpenAI) via SDK `openai`. Modelo configurável por `AI_MODEL`. Usada para classificar produtos (é merch de anime oficial?) e escrever legendas.
 - **Regra de ouro**: nenhum post afirma "menor preço" ou "desconto" sem prova no histórico de preço próprio (mínimo de 60 dias ou queda >=15% vs mediana de 30 dias). Sem histórico: post "novo no radar", sem alegação de economia e com limite baixo por dia.
+- **Métricas (fase 2)**: importação diária de conversões da Shopee (20:50, janela de 7 dias) e
+  relatório diário ao admin por DM (21:00): posts do dia, produtos novos, vendas, comissão e top 3 posts.
+
+## Comandos do bot (somente admins em `ADMIN_TELEGRAM_IDS`)
+
+| Comando | Ação |
+|---|---|
+| `/stats` | posts hoje/semana, fila pendente, produtos monitorados, estado da publicação |
+| `/pause` / `/resume` | liga/desliga a publicação (estado no banco, compartilhado bot↔worker) |
+| `/preview` | mostra o próximo post da fila sem publicar |
+| `/health` | última execução de cada job do worker + erros recentes |
+| `/addkeyword <termo>` / `/removekeyword <termo>` | gerencia keywords de busca |
+| `/blacklist <termo>` | adiciona termo à blacklist (títulos com ele nunca são postados) |
 
 ## Stack
 
@@ -81,10 +95,11 @@ docker compose logs -f worker
 
 ## Fases
 
-- **Fase 1 (atual)**: MVP — coleta Shopee, histórico de preços, classifier, filtros, copywriter,
-  publisher com limites, comandos `/stats` `/pause` `/resume` `/preview`.
-- Fase 2: regra completa do deal engine + anti-repetição já implementados e testados; faltam
-  `/health`, `/blacklist`, `/addkeyword`, importação de conversões e relatório diário.
+- **Fase 1 ✅**: MVP — coleta Shopee, histórico de preços, classifier, filtros, copywriter,
+  publisher com limites, comandos `/stats` `/pause` `/resume` `/preview`. Validado com APIs reais.
+- **Fase 2 ✅**: `/health`, `/blacklist`, `/addkeyword`, `/removekeyword`, importação diária de
+  conversões (tabela `conversions`) e relatório diário ao admin. Anti-repetição e regra de
+  "menor preço em 60 dias" com prova no histórico, cobertas por testes sintéticos.
 - Fase 3: plano premium (Stripe, reaproveitando o padrão do projeto `subbotTelegram`), `/start`,
   follows e alertas por DM.
 - Fase 4: Mercado Livre e Amazon (se as APIs/programas estiverem liberados).
@@ -107,6 +122,9 @@ Validado com credenciais reais em 2026-10:
 
 - **Assinatura Shopee** = `SHA256(AppID + Timestamp + Payload + Secret)` puro (não HMAC) —
   validado contra a API. `subIds` do `generateShortLink` aceitam apenas alfanuméricos.
+- **Conversões Shopee** (`conversionReport`): sub_id chega em `utmContent`; comissão em
+  `totalCommission` (string); pedido em `orders.orderId`; args `Int64` vão como string nas
+  variáveis; `pageInfo` vem null quando não há conversões (por isso a query não o pede).
 - **Regra "menor preço em 60 dias"**: interpretada como "estritamente abaixo do mínimo dos 60 dias
   **anteriores**" (a observação atual não entra na janela). Na leitura literal, qualquer produto
   com preço estável seria sempre "menor preço em 60 dias" — não é promoção.

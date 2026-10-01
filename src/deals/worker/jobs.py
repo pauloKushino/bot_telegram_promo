@@ -22,7 +22,13 @@ from deals.config import settings
 from deals.db import repositories as repo
 from deals.db.base import AsyncSessionLocal
 from deals.db.models import PostQueue, PostStatus, Product
-from deals.engine.deals import PricePoint, evaluate_deal, has_enough_history, is_repost_blocked
+from deals.engine.deals import (
+    PricePoint,
+    evaluate_deal,
+    format_brl,
+    has_enough_history,
+    is_repost_blocked,
+)
 from deals.engine.filters import apply_filters
 from deals.publisher.queue import PublishLimits, can_publish, local_day_start
 from deals.publisher.telegram import TelegramPublishError, send_post
@@ -38,12 +44,12 @@ DEACTIVATE_AFTER_DAYS = 7
 # ---------------------------------------------------------------- collect
 
 
-async def collect_job(adapters: list[StoreAdapter] | None = None) -> None:
+async def collect_job(adapters: list[StoreAdapter] | None = None) -> str | None:
     """Coleta ofertas de cada keyword ativa em cada loja habilitada."""
     adapters = adapters if adapters is not None else get_enabled_adapters()
     if not adapters:
         logger.warning("Nenhum adapter de loja habilitado; coleta pulada")
-        return
+        return "nenhum adapter habilitado"
 
     total_new, total_updated = 0, 0
     async with AsyncSessionLocal() as session:
@@ -80,6 +86,7 @@ async def collect_job(adapters: list[StoreAdapter] | None = None) -> None:
         "Coleta: {} novos, {} atualizados, {} desativados (>{}d sem aparecer)",
         total_new, total_updated, deactivated, DEACTIVATE_AFTER_DAYS,
     )
+    return f"{total_new} novos, {total_updated} atualizados, {deactivated} desativados"
 
 
 async def _latest_price(session, product_id: int) -> Decimal | None:
@@ -90,14 +97,14 @@ async def _latest_price(session, product_id: int) -> Decimal | None:
 # ---------------------------------------------------------------- classify
 
 
-async def classify_job(llm: LLMClient | None = None) -> None:
+async def classify_job(llm: LLMClient | None = None) -> str | None:
     """Classifica produtos novos com IA (resultado cacheado no próprio produto)."""
     llm = llm or get_llm()
     async with AsyncSessionLocal() as session:
         products = await repo.get_unclassified_products(session, limit=50)
         if not products:
             logger.debug("Classificação: nada pendente")
-            return
+            return "nada pendente"
 
         inputs = []
         for p in products:
@@ -115,7 +122,7 @@ async def classify_job(llm: LLMClient | None = None) -> None:
             results = await classify_products(llm, inputs)
         except (ClassifierError, LLMError) as exc:
             logger.error("Classificação falhou neste ciclo (produtos ficam p/ o próximo): {}", exc)
-            return
+            return f"falhou: {exc}"
 
         for product_id, cls in results.items():
             await repo.apply_classification(
@@ -130,12 +137,15 @@ async def classify_job(llm: LLMClient | None = None) -> None:
             )
         await session.commit()
     logger.info("Classificação: {} produtos classificados", len(results))
+    return f"{len(results)} classificados"
 
 
 # ---------------------------------------------------------------- build queue
 
 
-async def build_queue_job(llm: LLMClient | None = None, adapters: list[StoreAdapter] | None = None) -> None:
+async def build_queue_job(
+    llm: LLMClient | None = None, adapters: list[StoreAdapter] | None = None
+) -> str | None:
     """Deal engine + copywriter: transforma candidatos em posts na fila."""
     llm = llm or get_llm()
     adapters_by_name = {a.name: a for a in (adapters if adapters is not None else get_enabled_adapters())}
@@ -206,6 +216,7 @@ async def build_queue_job(llm: LLMClient | None = None, adapters: list[StoreAdap
 
         await session.commit()
     logger.info("Fila de ofertas: {} novos posts enfileirados", enqueued)
+    return f"{enqueued} enfileirados"
 
 
 async def _deal_candidates(session) -> list[Product]:
@@ -286,10 +297,113 @@ async def _enqueue_candidate(
     logger.info("Enfileirado produto {} ({}): {}", product.id, sub_id, reason)
 
 
+# ---------------------------------------------------------------- conversões e relatório (fase 2)
+
+
+async def import_conversions_job() -> str | None:
+    """Importa o relatório de conversões da Shopee (spec 7.7). Diário, janela de 7 dias."""
+    adapters = get_enabled_adapters()
+    shopee = next((a for a in adapters if a.name == "shopee"), None)
+    if shopee is None or not hasattr(shopee, "fetch_conversions"):
+        logger.warning("Importação de conversões: adapter Shopee indisponível")
+        return None
+
+    now = datetime.now(UTC)
+    start = int((now - timedelta(days=7)).timestamp())  # janela com folga p/ atraso de atribuição
+    conversions = await shopee.fetch_conversions(start, int(now.timestamp()))  # type: ignore[attr-defined]
+
+    novas = 0
+    async with AsyncSessionLocal() as session:
+        for c in conversions:
+            nova = await repo.upsert_conversion(
+                session,
+                store="shopee",
+                sub_id=c.sub_id,
+                order_id=c.order_id,
+                commission=c.commission,
+                status=c.status,
+                occurred_at=datetime.fromtimestamp(c.occurred_at, UTC),
+            )
+            novas += 1 if nova else 0
+        await session.commit()
+    return f"{novas} conversões novas de {len(conversions)} importadas"
+
+
+def render_daily_report(
+    *,
+    posts_today: int,
+    new_products_today: int,
+    pending_queue: int,
+    conversions_today: int,
+    commission_today: Decimal,
+    top_posts: list[tuple[str, Decimal]],  # (link_afiliado, comissão_total)
+) -> str:
+    """Texto do relatório diário ao admin (HTML p/ Telegram). Função pura p/ teste."""
+    linhas = [
+        "📈 <b>Relatório diário</b>",
+        f"Posts publicados hoje: <b>{posts_today}</b>",
+        f"Produtos novos monitorados: <b>{new_products_today}</b>",
+        f"Fila pendente: <b>{pending_queue}</b>",
+        "",
+        f"Vendas hoje: <b>{conversions_today}</b>",
+        f"Comissão estimada hoje: <b>{format_brl(commission_today)}</b>",
+    ]
+    if top_posts:
+        linhas.append("")
+        linhas.append("<b>Top posts do dia (por comissão):</b>")
+        for i, (link, total) in enumerate(top_posts, start=1):
+            linhas.append(f"{i}. {format_brl(total)} — <a href=\"{link}\">post</a>")
+    else:
+        linhas.append("")
+        linhas.append("Sem vendas atribuídas a posts hoje (ainda).")
+    return "\n".join(linhas)
+
+
+async def daily_report_job(bot: Bot | None = None) -> str | None:
+    """Envia o relatório diário por DM para cada admin (spec 7.7)."""
+    own_bot = bot is None
+    if own_bot:
+        bot = Bot(token=settings.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+    now = datetime.now(UTC)
+    day_start = local_day_start(now, settings.TIMEZONE)
+
+    try:
+        async with AsyncSessionLocal() as session:
+            posts_today = await repo.count_posted_between(session, day_start, now)
+            new_products = await repo.count_products_since(session, day_start)
+            pending = await repo.count_pending_posts(session)
+            conversions = await repo.conversions_between(session, day_start, now)
+            commission = await repo.commission_sum_between(session, day_start, now)
+            tops = await repo.top_posts_by_commission(session, day_start, now)
+
+        texto = render_daily_report(
+            posts_today=posts_today,
+            new_products_today=new_products,
+            pending_queue=pending,
+            conversions_today=len(conversions),
+            commission_today=commission,
+            top_posts=[(p.affiliate_link, total) for p, total in tops],
+        )
+
+        enviados = 0
+        for admin_id in settings.ADMIN_TELEGRAM_IDS:
+            try:
+                await bot.send_message(admin_id, texto, disable_web_page_preview=True)
+                enviados += 1
+            except Exception:
+                logger.exception("Relatório diário: falha ao enviar DM p/ admin {}", admin_id)
+        logger.info("Relatório diário enviado a {}/{} admins", enviados, len(settings.ADMIN_TELEGRAM_IDS))
+        return f"relatório p/ {enviados} admin(s)"
+    finally:
+        if own_bot:
+            await bot.session.close()
+
+
 # ---------------------------------------------------------------- publish
 
 
-async def publish_job(bot: Bot | None = None) -> None:
+async def publish_job(bot: Bot | None = None) -> str | None:
     """Publica o próximo post da fila respeitando pausa, silêncio e limites."""
     own_bot = bot is None
     if own_bot:
@@ -316,18 +430,18 @@ async def publish_job(bot: Bot | None = None) -> None:
             )
             if not decision.allowed:
                 logger.debug("Publish pulado: {}", decision.reason)
-                return
+                return None
 
             post = await repo.pop_due_post(session, now)
             if post is None:
                 logger.debug("Publish: fila vazia")
-                return
+                return None
 
             product = await session.get(Product, post.product_id)
             if product is None:
                 await repo.mark_post(session, post, PostStatus.SKIPPED)
                 await session.commit()
-                return
+                return None
 
             try:
                 message_id = await send_post(bot, settings.CHANNEL_ID, post, product)
@@ -335,11 +449,12 @@ async def publish_job(bot: Bot | None = None) -> None:
                 logger.error("Falha ao publicar post {}: {}", post.id, exc)
                 await repo.mark_post(session, post, PostStatus.FAILED)
                 await session.commit()
-                return
+                return None
 
             await repo.mark_post(session, post, PostStatus.POSTED, telegram_message_id=message_id)
             await session.commit()
             logger.info("Publicado post {} (produto {}) msg_id={}", post.id, post.product_id, message_id)
+            return f"publicado post {post.id} (produto {post.product_id})"
     finally:
         if own_bot:
             await bot.session.close()

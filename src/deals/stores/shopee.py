@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 from loguru import logger
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from deals.config import settings
 from deals.stores.base import RawOffer, StoreAdapter
@@ -55,6 +55,40 @@ mutation generateShortLink($originUrl: String!, $subIds: [String!]) {
   }
 }
 """
+
+# Schema VALIDADO por introspecção + chamada real em 2026-10 (scripts/introspect_shopee.py,
+# scripts/validate_conversions.py):
+#   - sub_id do link curto aparece em utmContent
+#   - comissão é totalCommission (string); pedido em orders.orderId
+#   - args Int64 devem ir como STRING nas variáveis (int JSON dá "wrong type")
+#   - pageInfo vem null quando não há conversões ("got null for non-null"), por isso
+#     a query não o pede. Se um dia passar de 100 conversões/semana, paginar com scrollId.
+CONVERSIONS_QUERY = """
+query conversionReport($start: Int64!, $end: Int64!, $limit: Int!) {
+  conversionReport(purchaseTimeStart: $start, purchaseTimeEnd: $end, limit: $limit) {
+    nodes {
+      purchaseTime
+      conversionStatus
+      totalCommission
+      utmContent
+      orders {
+        orderId
+        orderStatus
+      }
+    }
+  }
+}
+"""
+
+
+class ShopeeConversion(BaseModel):
+    """Conversão normalizada importada do relatório da Shopee."""
+
+    order_id: str
+    sub_id: str | None  # utmContent
+    commission: Decimal | None
+    status: str
+    occurred_at: int  # unix timestamp (purchaseTime)
 
 
 class ShopeeAdapter:
@@ -146,6 +180,36 @@ class ShopeeAdapter:
                 logger.warning("Oferta Shopee descartada (formato inesperado): {}", exc)
         logger.info("Shopee '{}': {} ofertas válidas de {} retornadas", keyword, len(offers), len(nodes))
         return offers
+
+    async def fetch_conversions(self, start_ts: int, end_ts: int, limit: int = 100) -> list[ShopeeConversion]:
+        """Importa o relatório de conversões (spec 7.7). Nunca levanta exceção."""
+        # Int64 nesta API deve vir como STRING nas variáveis ("wrong type" caso
+        # contrário); scrollId omitido se None (null explícito também falha).
+        # Ambos validados contra a API em 2026-10.
+        variables: dict = {"start": str(start_ts), "end": str(end_ts), "limit": limit}
+        data = await self._graphql(CONVERSIONS_QUERY, variables)
+        if not data:
+            return []
+
+        report = data.get("conversionReport") or {}
+        conversions: list[ShopeeConversion] = []
+        for node in report.get("nodes") or []:
+            try:
+                order = node.get("orders") or {}
+                commission = _to_float(node.get("totalCommission"))
+                conversions.append(
+                    ShopeeConversion(
+                        order_id=str(order.get("orderId", "")),
+                        sub_id=node.get("utmContent") or None,
+                        commission=Decimal(str(commission)) if commission is not None else None,
+                        status=str(node.get("conversionStatus", "unknown")).lower(),
+                        occurred_at=int(node["purchaseTime"]),
+                    )
+                )
+            except (KeyError, ValidationError, ValueError, TypeError) as exc:
+                logger.warning("Conversão Shopee descartada (formato inesperado): {}", exc)
+        logger.info("Conversões Shopee: {} importadas", len(conversions))
+        return conversions
 
     async def build_affiliate_link(self, offer: RawOffer, sub_id: str) -> str:
         """Gera link curto com sub_id por post p/ rastrear cliques/vendas.

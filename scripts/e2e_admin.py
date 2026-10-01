@@ -88,7 +88,39 @@ async def main() -> int:
         text = await conversa(conv, "/stats")
         check("/stats mostra ativa", "ativa" in text)
 
+        # ---------------- fase 2 ----------------
+
+        # 7) /health lista jobs (ou avisa que não rodou)
+        text = await conversa(conv, "/health")
+        check(
+            "/health responde",
+            ("Saúde dos jobs" in text) or ("Nenhuma execução" in text),
+            text[:60].replace("\n", " "),
+        )
+
+        # 8) /addkeyword + /removekeyword (limpa no final)
+        kw = "zze2e palavra teste"
+        text = await conversa(conv, f"/addkeyword {kw}")
+        check("/addkeyword confirma", "Keyword adicionada" in text)
+        text = await conversa(conv, f"/removekeyword {kw}")
+        check("/removekeyword confirma", "Keyword removida" in text)
+
+        # 9) /blacklist com termo de teste (desativado no banco após o check)
+        bl = "zze2etermebloqueio"
+        text = await conversa(conv, f"/blacklist {bl}")
+        check("/blacklist confirma", "blacklist" in text.lower())
+
     await client.disconnect()
+
+    # limpeza: desativa o termo de teste na blacklist
+    from sqlalchemy import update
+
+    from deals.db.models import BlacklistTerm
+
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(BlacklistTerm).where(BlacklistTerm.term == bl).values(active=False))
+        await s.commit()
+    print("  (limpeza: termo de teste da blacklist desativado)")
 
     falhas = [n for n, ok, _ in resultados if not ok]
     print(f"\n{len(resultados) - len(falhas)}/{len(resultados)} checks passaram")

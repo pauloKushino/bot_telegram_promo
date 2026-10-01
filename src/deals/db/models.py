@@ -133,6 +133,25 @@ class PostQueue(Base):
     __table_args__ = (Index("ix_post_queue_status_scheduled", "status", "scheduled_for"),)
 
 
+class Conversion(Base):
+    """Conversão (venda/comissão) importada da API de afiliados (fase 2, spec 7.7)."""
+
+    __tablename__ = "conversions"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    store: Mapped[Store] = mapped_column(StoreColumn, nullable=False)
+    sub_id: Mapped[str | None] = mapped_column(String(64))  # amarra a conversão ao post
+    order_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    commission: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    status: Mapped[str] = mapped_column(String(30), nullable=False)  # ex.: approved, pending, rejected
+    occurred_at: Mapped[datetime] = mapped_column(TzDateTime, nullable=False)
+
+    __table_args__ = (
+        Index("ix_conversions_store_order", "store", "order_id", unique=True),
+        Index("ix_conversions_sub_id", "sub_id"),
+    )
+
+
 class BotSetting(Base):
     """Chave-valor simples p/ estado compartilhado entre os processos bot e worker (ex.: pausa)."""
 

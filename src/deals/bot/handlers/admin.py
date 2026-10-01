@@ -7,7 +7,7 @@ Fase 2: /health, /blacklist, /addkeyword, /removekeyword.
 from datetime import UTC, datetime, timedelta
 
 from aiogram import Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from loguru import logger
 
@@ -88,3 +88,78 @@ async def cmd_preview(message: Message) -> None:
         f"{status}\n<i>{reason}</i>\n\n{text}\n\n🔗 {link}",
         disable_web_page_preview=True,
     )
+
+
+# ------------------------------------------------------------------ fase 2
+
+
+def _job_line(nome: str, info: dict) -> str:
+    status = "✅" if info.get("ok") else "❌"
+    at = info.get("at", "?")[:19].replace("T", " ")
+    detail = info.get("detail", "")
+    return f"{status} <b>{nome}</b>: {at} UTC — {detail}"
+
+
+@router.message(Command("health"))
+async def cmd_health(message: Message) -> None:
+    """Último ciclo de cada job + erros recentes (spec 7.6)."""
+    if not _is_admin(message):
+        return
+    async with AsyncSessionLocal() as session:
+        runs = await repo.get_job_runs(session)
+
+    if not runs:
+        await message.answer("Nenhuma execução de job registrada ainda (worker rodando?).")
+        return
+
+    linhas = ["🏥 <b>Saúde dos jobs</b>"]
+    for nome, info in sorted(runs.items()):
+        linhas.append(_job_line(nome, info))
+    await message.answer("\n".join(linhas))
+
+
+@router.message(Command("blacklist"))
+async def cmd_blacklist(message: Message, command: CommandObject) -> None:
+    if not _is_admin(message):
+        return
+    term = (command.args or "").strip().lower()
+    if not term:
+        await message.answer("Uso: /blacklist <termo>")
+        return
+    async with AsyncSessionLocal() as session:
+        await repo.add_blacklist_term(session, term)
+        await session.commit()
+    await message.answer(f"🚫 Termo adicionado à blacklist: <code>{term}</code>")
+    logger.info("Blacklist: '{}' adicionado por {}", term, message.from_user.id if message.from_user else "?")
+
+
+@router.message(Command("addkeyword"))
+async def cmd_addkeyword(message: Message, command: CommandObject) -> None:
+    if not _is_admin(message):
+        return
+    term = (command.args or "").strip()
+    if not term:
+        await message.answer("Uso: /addkeyword <termo>")
+        return
+    async with AsyncSessionLocal() as session:
+        await repo.add_keyword(session, term)
+        await session.commit()
+    await message.answer(f"🔍 Keyword adicionada (todas as lojas): <code>{term}</code>")
+    logger.info("Keyword '{}' adicionada por {}", term, message.from_user.id if message.from_user else "?")
+
+
+@router.message(Command("removekeyword"))
+async def cmd_removekeyword(message: Message, command: CommandObject) -> None:
+    if not _is_admin(message):
+        return
+    term = (command.args or "").strip()
+    if not term:
+        await message.answer("Uso: /removekeyword <termo>")
+        return
+    async with AsyncSessionLocal() as session:
+        removed = await repo.deactivate_keyword(session, term)
+        await session.commit()
+    if removed:
+        await message.answer(f"🗑️ Keyword removida: <code>{term}</code>")
+    else:
+        await message.answer(f"Keyword não encontrada (ou já inativa): <code>{term}</code>")

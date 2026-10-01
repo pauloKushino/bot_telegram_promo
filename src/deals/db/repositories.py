@@ -4,6 +4,7 @@ Nada aqui faz commit próprio além do necessário para a operação; chamadores
 (jobs, handlers) controlam a sessão com `async with AsyncSessionLocal() as s`.
 """
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -15,6 +16,7 @@ from deals.db.models import (
     SETTING_PAUSED,
     BlacklistTerm,
     BotSetting,
+    Conversion,
     Keyword,
     PostQueue,
     PostStatus,
@@ -174,6 +176,12 @@ async def get_active_keywords(session: AsyncSession) -> list[Keyword]:
 
 
 async def add_keyword(session: AsyncSession, term: str, store: str | None = None) -> Keyword:
+    """Idempotente: keyword ativa com o mesmo termo é retornada sem duplicar."""
+    existing = await session.scalar(
+        select(Keyword).where(Keyword.term == term.strip(), Keyword.active.is_(True))
+    )
+    if existing is not None:
+        return existing
     kw = Keyword(term=term.strip(), store=store, active=True)
     session.add(kw)
     await session.flush()
@@ -195,6 +203,11 @@ async def get_active_blacklist_terms(session: AsyncSession) -> list[str]:
 
 
 async def add_blacklist_term(session: AsyncSession, term: str) -> BlacklistTerm:
+    """Idempotente: termo existente (único no banco) é apenas reativado."""
+    existing = await session.scalar(select(BlacklistTerm).where(BlacklistTerm.term == term.strip().lower()))
+    if existing is not None:
+        existing.active = True
+        return existing
     bt = BlacklistTerm(term=term.strip().lower(), active=True)
     session.add(bt)
     await session.flush()
@@ -317,6 +330,107 @@ async def get_last_posted_at(session: AsyncSession) -> datetime | None:
     )
 
 
+# ---------------------------------------------------------------- conversões (fase 2)
+
+
+async def upsert_conversion(
+    session: AsyncSession,
+    *,
+    store: str,
+    sub_id: str | None,
+    order_id: str,
+    commission: Decimal | None,
+    status: str,
+    occurred_at: datetime,
+) -> bool:
+    """Insere conversão nova ou atualiza status/comissão da existente (spec 7.7).
+
+    Dedup por (store, order_id): o relatório diário pode trazer o mesmo pedido
+    em janelas sobrepostas. Retorna True se era conversão nova.
+    """
+    existing = await session.scalar(
+        select(Conversion).where(Conversion.store == store, Conversion.order_id == order_id)
+    )
+    if existing is not None:
+        existing.status = status
+        if commission is not None:
+            existing.commission = commission
+        if sub_id is not None:
+            existing.sub_id = sub_id
+        return False
+
+    session.add(
+        Conversion(
+            store=store,
+            sub_id=sub_id,
+            order_id=order_id,
+            commission=commission,
+            status=status,
+            occurred_at=occurred_at,
+        )
+    )
+    return True
+
+
+async def conversions_between(session: AsyncSession, start: datetime, end: datetime) -> list[Conversion]:
+    result = await session.scalars(
+        select(Conversion)
+        .where(Conversion.occurred_at >= start, Conversion.occurred_at < end)
+        .order_by(Conversion.occurred_at)
+    )
+    return list(result)
+
+
+async def commission_sum_between(session: AsyncSession, start: datetime, end: datetime) -> Decimal:
+    return (
+        await session.scalar(
+            select(func.coalesce(func.sum(Conversion.commission), 0)).where(
+                Conversion.occurred_at >= start, Conversion.occurred_at < end
+            )
+        )
+    ) or Decimal("0")
+
+
+async def top_posts_by_commission(
+    session: AsyncSession, start: datetime, end: datetime, limit: int = 3
+) -> list[tuple[PostQueue, Decimal]]:
+    """Posts mais rentáveis no período (join conversions.sub_id → post_queue)."""
+    stmt = (
+        select(PostQueue, func.sum(Conversion.commission).label("total"))
+        .join(Conversion, Conversion.sub_id == PostQueue.sub_id)
+        .where(Conversion.occurred_at >= start, Conversion.occurred_at < end)
+        .group_by(PostQueue.id)
+        .order_by(desc("total"))
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [(row[0], row[1]) for row in rows]
+
+
+# ---------------------------------------------------------------- status dos jobs (/health)
+
+SETTING_JOB_RUNS = "job_runs"  # JSON: {nome_do_job: {"at": iso, "ok": bool, "detail": str}}
+
+
+async def record_job_run(session: AsyncSession, name: str, ok: bool, detail: str = "") -> None:
+    """Registra a última execução de um job (lido pelo /health)."""
+    existing = await session.get(BotSetting, SETTING_JOB_RUNS)
+    runs: dict = json.loads(existing.value) if existing else {}
+    runs[name] = {"at": datetime.now(UTC).isoformat(timespec="seconds"), "ok": ok, "detail": detail[:300]}
+    payload = json.dumps(runs, ensure_ascii=False)
+
+    if existing is None:
+        session.add(BotSetting(key=SETTING_JOB_RUNS, value=payload))
+    else:
+        existing.value = payload
+    await session.flush()
+
+
+async def get_job_runs(session: AsyncSession) -> dict:
+    value = await session.scalar(select(BotSetting.value).where(BotSetting.key == SETTING_JOB_RUNS))
+    return json.loads(value) if value else {}
+
+
 # ---------------------------------------------------------------- estado do bot (pausa) e stats
 
 
@@ -337,6 +451,12 @@ async def set_paused(session: AsyncSession, paused: bool) -> None:
 
 async def count_active_products(session: AsyncSession) -> int:
     return (await session.scalar(select(func.count(Product.id)).where(Product.active.is_(True)))) or 0
+
+
+async def count_products_since(session: AsyncSession, since: datetime) -> int:
+    return (
+        await session.scalar(select(func.count(Product.id)).where(Product.first_seen_at >= since))
+    ) or 0
 
 
 async def count_pending_posts(session: AsyncSession) -> int:
