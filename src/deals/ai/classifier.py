@@ -17,8 +17,9 @@ from pydantic import BaseModel, Field, field_validator
 from deals.ai.client import LLMClient
 from deals.db.models import ProductType
 
-BATCH_SIZE = 10
+BATCH_SIZE = 5  # lotes pequenos: menos truncamento de JSON e latência menor no tier free
 MAX_JSON_RETRIES = 2
+CLASSIFY_MAX_TOKENS = 4096
 
 VALID_TYPES = {t.value for t in ProductType}
 
@@ -134,15 +135,15 @@ async def _classify_batch(llm: LLMClient, batch: list[ProductInput]) -> dict[int
     last_error: Exception | None = None
 
     for attempt in range(1, MAX_JSON_RETRIES + 2):  # 1 tentativa + MAX_JSON_RETRIES retries
-        text = await llm.chat(SYSTEM_PROMPT, prompt, max_tokens=2000, temperature=0.1)
+        text = await llm.chat(SYSTEM_PROMPT, prompt, max_tokens=CLASSIFY_MAX_TOKENS, temperature=0.1)
         try:
             parsed = parse_classifications(text, expected_count=len(batch))
             return {p.id: c for p, c in zip(batch, parsed, strict=True)}
         except (ValueError, KeyError) as exc:
             last_error = exc
             logger.warning(
-                "JSON de classificação inválido (tentativa {}/{}): {}",
-                attempt, MAX_JSON_RETRIES + 1, exc,
+                "JSON de classificação inválido (tentativa {}/{}): {} | início da resposta: {!r}",
+                attempt, MAX_JSON_RETRIES + 1, exc, text[:200],
             )
 
     raise ClassifierError(f"lote de {len(batch)} produtos falhou após retries: {last_error}")

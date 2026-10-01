@@ -243,7 +243,8 @@ async def _enqueue_candidate(
     is_radar: bool,
 ) -> None:
     adapter = adapters_by_name.get(product.store.value)
-    sub_id = f"p{product.id}-{uuid.uuid4().hex[:8]}"  # rastreio por post
+    # sub_id curto e alfanumérico: Shopee rejeita hífens ("invalid sub id")
+    sub_id = f"p{product.id}x{uuid.uuid4().hex[:8]}"  # rastreio por post
 
     offer = RawOffer(
         store=product.store.value,

@@ -89,18 +89,33 @@ docker compose logs -f worker
   follows e alertas por DM.
 - Fase 4: Mercado Livre e Amazon (se as APIs/programas estiverem liberados).
 
-## Decisões e pendências a validar com credenciais reais
+## Estado da validação real (Fase 1 concluída)
 
-- **Shopee GraphQL**: formato do header `Authorization` (HMAC/SHA256) e nomes exatos dos campos de
-  `productOfferV2`/`generateShortLink` estão centralizados no topo de `src/deals/stores/shopee.py`
-  para validação rápida na primeira coleta real (spec 7.1, "a validar").
+Validado com credenciais reais em 2026-10:
+
+- ✅ `docker compose up` sobe postgres, bot e worker sem erro
+- ✅ Migrações Alembic aplicam do zero (host e container)
+- ✅ Coleta real da Shopee grava produtos e preços (111 produtos no primeiro ciclo)
+- ✅ Classifier separa merch oficial do resto em amostra real — inclusive a ambiguidade
+  "mangá" (quadrinho) vs "manga" (roupa), e rebaixa a confiança de figures suspeitas
+- ✅ Post real publicado no canal com foto, legenda, botão e link de afiliado encurtado
+- ✅ Limites diário/intervalo/silêncio cobertos por testes e observados ao vivo
+- ✅ Falha na API da loja ou da IA não derruba o worker (observado com 503/timeout da NIM)
+- ✅ 47 testes passando (fakes + integração Postgres); `ruff` limpo
+
+## Decisões relevantes
+
+- **Assinatura Shopee** = `SHA256(AppID + Timestamp + Payload + Secret)` puro (não HMAC) —
+  validado contra a API. `subIds` do `generateShortLink` aceitam apenas alfanuméricos.
 - **Regra "menor preço em 60 dias"**: interpretada como "estritamente abaixo do mínimo dos 60 dias
   **anteriores**" (a observação atual não entra na janela). Na leitura literal, qualquer produto
   com preço estável seria sempre "menor preço em 60 dias" — não é promoção.
 - **`bot_settings`**: tabela-chave/valor extra (não listada na spec) para o estado de pausa
   compartilhado entre os processos bot e worker.
-- **IA**: `AI_MODEL` deve ser um chat model do catálogo NVIDIA NIM (padrão `meta/llama-3.3-70b-instruct`).
-  A confiabilidade da saída em JSON varia por modelo; há retry e validação Pydantic no classifier.
+- **IA**: NVIDIA NIM (API compatível com OpenAI). Padrão `nvidia/nemotron-3-ultra-550b-a55b`,
+  escolhido por benchmark empírico contra 12 modelos do catálogo
+  (`scripts/benchmark_models.py`): 5/5 no gabarito de classificação, mais rápido dos bons.
+  Fallback de qualidade medida: `moonshotai/kimi-k3`.
 
 ## Testes
 

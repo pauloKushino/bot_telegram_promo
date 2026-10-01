@@ -1,17 +1,14 @@
 """Adapter da API oficial de afiliados da Shopee (GraphQL).
 
-PONTOS A VALIDAR com credenciais reais (spec seção 7.1):
-  - Formato exato do header Authorization (SHA256 Credential/Timestamp/Signature)
-  - Nomes/tipos exatos dos campos da query productOfferV2
-  - Assinatura e resposta da mutation generateShortLink
-
-Tudo foi escrito a partir da documentação pública da Shopee Open Platform
-Affiliate, mas nunca foi exercitado com credenciais reais neste projeto.
+VALIDADO contra a API real em 2026-10 (scripts/validate_shopee.py):
+  - Signature = SHA256 hex de (AppID + Timestamp + Payload + Secret) — puro, NÃO HMAC
+  - productOfferV2 com keyword/page/limit retorna os campos mapeados abaixo
+  - generateShortLink: variável subIds é [String!] e os valores devem ser
+    alfanuméricos (hífen é rejeitado com "invalid sub id")
 """
 
 import asyncio
 import hashlib
-import hmac
 import json
 import time
 from decimal import Decimal, InvalidOperation
@@ -52,7 +49,7 @@ query productOfferV2($keyword: String!, $page: Int!, $limit: Int!) {
 """
 
 SHORT_LINK_MUTATION = """
-mutation generateShortLink($originUrl: String!, $subIds: [String]) {
+mutation generateShortLink($originUrl: String!, $subIds: [String!]) {
   generateShortLink(input: {originUrl: $originUrl, subIds: $subIds}) {
     shortLink
   }
@@ -79,10 +76,15 @@ class ShopeeAdapter:
     # ------------------------------------------------------------ internals
 
     def _auth_header(self, payload: str) -> str:
-        """Assinatura HMAC-SHA256. VALIDAR formato na doc oficial."""
+        """Assinatura conforme doc oficial (validada contra a API em 2026-10):
+
+        Signature = SHA256 hexdigest de (AppID + Timestamp + Payload + Secret)
+        — SHA256 puro sobre a concatenação (NÃO é HMAC), com o Payload sendo
+        exatamente a string do corpo JSON enviada na requisição.
+        """
         timestamp = str(int(time.time()))
-        factor = f"{self._app_id}{timestamp}{payload}"
-        signature = hmac.new(self._secret.encode(), factor.encode(), hashlib.sha256).hexdigest()
+        factor = f"{self._app_id}{timestamp}{payload}{self._secret}"
+        signature = hashlib.sha256(factor.encode()).hexdigest()
         return f"SHA256 Credential={self._app_id}, Timestamp={timestamp}, Signature={signature}"
 
     async def _graphql(self, query: str, variables: dict) -> dict | None:
