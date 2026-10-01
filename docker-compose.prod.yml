@@ -1,0 +1,75 @@
+# compose de PRODUÇÃO (VPS). Diferenças do de desenvolvimento:
+# - Postgres NÃO expõe porta no host (só rede interna)
+# - logs json-file com rotação (não enche o disco da VPS)
+# - uso: docker compose -f docker-compose.prod.yml up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-deals}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: ${POSTGRES_DB:-deals}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-deals} -d $${POSTGRES_DB:-deals}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  migrate:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deals}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deals}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deals}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deals}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "deals.bot"]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deals}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deals}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "deals.worker"]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pgdata:

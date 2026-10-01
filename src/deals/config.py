@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     MAX_RADAR_POSTS_PER_DAY: int = 2
     LOG_LEVEL: str = "INFO"
 
+    # Monitoramento externo (opcional): URL do healthchecks.io — o worker dá ping
+    # a cada ciclo; se ficar mudo, o healthchecks alerta por e-mail.
+    HEALTHCHECK_PING_URL: str = ""
+
     @field_validator("ADMIN_TELEGRAM_IDS", mode="before")
     @classmethod
     def parse_admin_ids(cls, value: object) -> object:

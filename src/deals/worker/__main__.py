@@ -11,6 +11,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from zoneinfo import ZoneInfo
 
+import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
@@ -54,6 +55,21 @@ async def _safe(name: str, job: Callable[[], Awaitable[str | None]]) -> None:
         await _record(name, ok=False, detail=f"{type(exc).__name__}: {exc}")
 
 
+async def _healthcheck_ping() -> None:
+    """Dead-man's switch p/ healthchecks.io: worker vivo => ping periódico.
+
+    Se o worker cair ou travar, o healthchecks deixa de receber ping e alerta
+    o admin por e-mail. Configurar HEALTHCHECK_PING_URL no .env.
+    """
+    if not settings.HEALTHCHECK_PING_URL:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.get(settings.HEALTHCHECK_PING_URL)
+    except httpx.HTTPError as exc:
+        logger.warning("Ping de monitoramento falhou: {}", exc)
+
+
 async def main() -> None:
     setup_logging()
     logger.info(
@@ -75,6 +91,7 @@ async def main() -> None:
                       args=["import_conversions", import_conversions_job], id="import_conversions")
     scheduler.add_job(_safe, "cron", hour=DAILY_REPORT_HOUR, minute=DAILY_REPORT_MIN,
                       args=["daily_report", daily_report_job], id="daily_report")
+    scheduler.add_job(_healthcheck_ping, "interval", minutes=10, id="healthcheck_ping")
     scheduler.start()
 
     # Primeiro ciclo imediato: não esperar o primeiro intervalo

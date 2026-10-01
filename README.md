@@ -93,6 +93,13 @@ docker compose logs -f worker
 > Sem credenciais reais de Telegram/Shopee/IA, o worker roda sem cair (loga e segue) e o bot fica
 > reiniciando por token inválido — configure o `.env` antes do uso real (ver "Fase 0" na spec).
 
+## Produção (VPS)
+
+Deploy na VPS via `docker-compose.prod.yml` + runbook completo em `deploy/README.md`
+(endurecimento SSH/firewall, migração do histórico local, backup diário com cópia no PC do
+operador, monitor de disponibilidade via healthchecks.io). Sem portas públicas além de SSH
+até a fase 3b (webhook Stripe + Caddy).
+
 ## Fases
 
 - **Fase 1 ✅**: MVP — coleta Shopee, histórico de preços, classifier, filtros, copywriter,
@@ -100,8 +107,8 @@ docker compose logs -f worker
 - **Fase 2 ✅**: `/health`, `/blacklist`, `/addkeyword`, `/removekeyword`, importação diária de
   conversões (tabela `conversions`) e relatório diário ao admin. Anti-repetição e regra de
   "menor preço em 60 dias" com prova no histórico, cobertas por testes sintéticos.
-- Fase 3: plano premium (Stripe, reaproveitando o padrão do projeto `subbotTelegram`), `/start`,
-  follows e alertas por DM.
+- Fase 3: usuários/follows/alertas grátis com limites (3a), webhook Stripe teste com Caddy (3b),
+  premium R$ 9,90/mês + canal VIP via Stripe live (3c). Padrões reaproveitados do `subbotTelegram`.
 - Fase 4: Mercado Livre e Amazon (se as APIs/programas estiverem liberados).
 
 ## Estado da validação real (Fase 1 concluída)
