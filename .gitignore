@@ -8,6 +8,10 @@ __pycache__/
 # Env e segredos
 .env
 
+# Sessão do userbot Telethon (E2E) — acesso total à conta; NUNCA versionar
+*.session
+*.session-journal
+
 # uv
 # uv.lock é versionado de propósito (build reproduzível)
 

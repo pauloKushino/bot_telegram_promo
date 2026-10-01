@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     SHOPEE_SECRET: str = ""
     SHOPEE_GRAPHQL_URL: str = "https://open-api.affiliate.shopee.com.br/graphql"
 
+    # Userbot Telethon (SÓ testes E2E em scripts/; o app nunca usa)
+    TG_API_ID: int = 0
+    TG_API_HASH: str = ""
+    TG_PHONE: str = ""
+    TG_SESSION_FILE: str = "userbot.session"
+
     # Comportamento
     COLLECT_INTERVAL_MIN: int = 20
     MAX_POSTS_PER_DAY: int = 20

@@ -126,7 +126,22 @@ uv run pytest                     # inclui integração com Postgres real
 ```
 
 Sem testes que dependam de API real no CI (spec seção 10). Integração manual com APIs reais fica
-em `scripts/`.
+em `scripts/`:
+
+| Script | Para quê |
+|---|---|
+| `check_env.py` | confere formato das credenciais sem exibir valores |
+| `validate_telegram.py` | bot válido + admin do canal + pode postar |
+| `validate_shopee.py` | busca real + resposta bruta + link de afiliado |
+| `validate_pipeline.py` | collect → classify → build_queue com APIs reais |
+| `validate_publish.py` | publica UM post pendente de verdade no canal |
+| `benchmark_models.py` | compara modelos NVIDIA NIM no gabarito do classifier |
+| `tg_login.py` + `e2e_admin.py` | teste E2E real dos comandos admin via userbot Telethon |
+
+Para o E2E (`e2e_admin.py`): crie um app em https://my.telegram.org → "API development tools",
+preencha `TG_API_ID`/`TG_API_HASH`/`TG_PHONE` no `.env` e rode `tg_login.py` uma vez (código
+chega no seu Telegram). O arquivo `userbot.session` dá acesso total à conta: é gitignored e pode
+ser revogado em Telegram → Configurações → Dispositivos.
 
 ## Segurança
 
