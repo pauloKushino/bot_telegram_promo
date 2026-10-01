@@ -1,0 +1,57 @@
+# Dentro do compose, o banco é "postgres:5432" (rede interna); a porta 15432
+# do host só serve para ferramentas rodando fora do Docker (alembic/pytest).
+x-database-url: &database-url
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deals}:${POSTGRES_PASSWORD:-deals_dev_password}@postgres:5432/${POSTGRES_DB:-deals}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-deals}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deals_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-deals}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Só para acesso a partir do host em desenvolvimento (alembic/pytest fora
+      # do Docker). Porta 15432 para não colidir com um PostgreSQL local.
+      # Em produção, esta seção pode ser removida (rede interna basta).
+      - "${POSTGRES_HOST_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-deals} -d $${POSTGRES_DB:-deals}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    env_file: .env
+    environment: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  bot:
+    build: .
+    env_file: .env
+    environment: *database-url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "deals.bot"]
+    restart: unless-stopped
+
+  worker:
+    build: .
+    env_file: .env
+    environment: *database-url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "deals.worker"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:

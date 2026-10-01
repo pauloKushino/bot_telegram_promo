@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.python-version
+
+# Env e segredos
+.env
+
+# uv
+# uv.lock é versionado de propósito (build reproduzível)
+
+# Testes
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# SO
+Thumbs.db
+desktop.ini
