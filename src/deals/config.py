@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     MIN_SELLER_RATING: float = 4.5
     MIN_SALES_COUNT: int = 5
     MIN_OFFICIAL_CONFIDENCE: float = 0.7
+    # Só vale enquanto não há histórico de preço (posts "novo no radar", sem alegar desconto)
+    MAX_RADAR_POSTS_PER_DAY: int = 2
     LOG_LEVEL: str = "INFO"
 
     @field_validator("ADMIN_TELEGRAM_IDS", mode="before")

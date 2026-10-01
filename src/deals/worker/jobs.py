@@ -36,8 +36,7 @@ from deals.stores import get_enabled_adapters
 from deals.stores.base import RawOffer, StoreAdapter
 
 # Produtos novos/sem histórico: postar como "novo no radar", sem alegar desconto
-# (spec fase 1). Limite baixo por dia.
-MAX_RADAR_POSTS_PER_DAY = 2
+# (spec fase 1). Limite diário configurável por env (MAX_RADAR_POSTS_PER_DAY).
 RADAR_REASON = "novo no radar: primeiro registro deste produto, sem histórico de preço"
 DEACTIVATE_AFTER_DAYS = 7
 
@@ -198,7 +197,7 @@ async def build_queue_job(
                 if verdict.is_deal:
                     reason = verdict.reason
                     reference = verdict.reference_price
-                elif is_radar and radar_today < MAX_RADAR_POSTS_PER_DAY:
+                elif is_radar and radar_today < settings.MAX_RADAR_POSTS_PER_DAY:
                     reason = RADAR_REASON
                     reference = None
                     radar_today += 1

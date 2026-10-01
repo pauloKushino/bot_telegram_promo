@@ -158,7 +158,7 @@ class BotSetting(Base):
     __tablename__ = "bot_settings"
 
     key: Mapped[str] = mapped_column(String(50), primary_key=True)
-    value: Mapped[str] = mapped_column(String(200), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 # Chave usada pelo /pause e /resume
