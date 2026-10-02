@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 
 from deals.ai.classifier import ClassifierError, ProductInput, classify_products
 from deals.ai.client import LLMClient, LLMError, get_llm
-from deals.ai.copywriter import CopyContext, CopywriterError, generate_caption
+from deals.ai.copywriter import DISCLOSURE_LINE, CopyContext, CopywriterError, generate_caption
 from deals.config import settings
 from deals.db import repositories as repo
 from deals.db.base import AsyncSessionLocal
@@ -30,6 +30,7 @@ from deals.engine.deals import (
     is_repost_blocked,
 )
 from deals.engine.filters import apply_filters
+from deals.publisher.dm import try_send_dm
 from deals.publisher.queue import PublishLimits, can_publish, local_day_start
 from deals.publisher.telegram import TelegramPublishError, send_post
 from deals.stores import get_enabled_adapters
@@ -143,11 +144,19 @@ async def classify_job(llm: LLMClient | None = None) -> str | None:
 
 
 async def build_queue_job(
-    llm: LLMClient | None = None, adapters: list[StoreAdapter] | None = None
+    llm: LLMClient | None = None,
+    adapters: list[StoreAdapter] | None = None,
+    bot: Bot | None = None,
 ) -> str | None:
-    """Deal engine + copywriter: transforma candidatos em posts na fila."""
+    """Deal engine + copywriter: transforma candidatos em posts na fila.
+
+    Após enfileirar, avisa por DM os seguidores da franquia (fase 3a).
+    """
     llm = llm or get_llm()
     adapters_by_name = {a.name: a for a in (adapters if adapters is not None else get_enabled_adapters())}
+    own_bot = bot is None
+    if own_bot:
+        bot = Bot(token=settings.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     now = datetime.now(UTC)
 
     enqueued = 0
@@ -207,6 +216,7 @@ async def build_queue_job(
                 await _enqueue_candidate(
                     session, llm, adapters_by_name, product, price,
                     reason=reason, reference_price=reference, is_radar=is_radar,
+                    bot=bot,
                 )
                 enqueued += 1
             except Exception:
@@ -214,6 +224,8 @@ async def build_queue_job(
                 logger.exception("Erro processando produto {} na fila de ofertas", product.id)
 
         await session.commit()
+    if own_bot:
+        await bot.session.close()
     logger.info("Fila de ofertas: {} novos posts enfileirados", enqueued)
     return f"{enqueued} enfileirados"
 
@@ -251,7 +263,8 @@ async def _enqueue_candidate(
     reason: str,
     reference_price: Decimal | None,
     is_radar: bool,
-) -> None:
+    bot: Bot | None = None,
+) -> PostQueue:
     adapter = adapters_by_name.get(product.store.value)
     # sub_id curto e alfanumérico: Shopee rejeita hífens ("invalid sub id")
     sub_id = f"p{product.id}x{uuid.uuid4().hex[:8]}"  # rastreio por post
@@ -281,9 +294,9 @@ async def _enqueue_candidate(
         caption = await generate_caption(llm, ctx)
     except (CopywriterError, LLMError) as exc:
         logger.warning("Copywriter rejeitou produto {}: {}", product.id, exc)
-        return  # descarta o post, como manda a spec
+        raise  # propaga p/ o loop do job não contar como enfileirado
 
-    await repo.enqueue_post(
+    post = await repo.enqueue_post(
         session,
         product_id=product.id,
         price_at_post=price,
@@ -294,6 +307,93 @@ async def _enqueue_candidate(
         sub_id=sub_id,
     )
     logger.info("Enfileirado produto {} ({}): {}", product.id, sub_id, reason)
+
+    if bot is not None:
+        await _notify_followers(bot, session, adapter, product, post, offer)
+    return post
+
+
+async def _notify_followers(
+    bot: Bot,
+    session,
+    adapter: StoreAdapter | None,
+    product: Product,
+    post: PostQueue,
+    offer: RawOffer,
+) -> int:
+    """DM para seguidores da franquia (fase 3a). Link com sub_id por usuário."""
+    if not product.franchise:
+        return 0
+    followers = await repo.get_followers_of_franchise(session, product.franchise)
+    sent = 0
+    for user in followers:
+        link = post.affiliate_link
+        if adapter is not None:
+            user_sub = f"{post.sub_id}u{user.tg_id}"  # alfanumérico (regra Shopee)
+            link = await adapter.build_affiliate_link(offer, user_sub)
+        text = f"🔔 Oferta de {product.franchise}!\n\n{post.message_text}"
+        if await try_send_dm(
+            bot, session, user, text, affiliate_link=link, kind="follow_push", post_id=post.id
+        ):
+            sent += 1
+    if followers:
+        logger.info("Oferta de '{}': DM enviada p/ {}/{} seguidores", product.franchise, sent, len(followers))
+    return sent
+
+
+# ---------------------------------------------------------------- alertas de preço (fase 3a)
+
+
+async def check_alerts_job(
+    bot: Bot | None = None, adapters: list[StoreAdapter] | None = None
+) -> str | None:
+    """Dispara alertas cujo último preço caiu ABAIXO do alvo. One-shot por alerta."""
+    own_bot = bot is None
+    if own_bot:
+        bot = Bot(token=settings.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+    adapters_by_name = {a.name: a for a in (adapters if adapters is not None else get_enabled_adapters())}
+
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = await repo.get_active_alerts_with_products(session)
+            if not rows:
+                return "nenhum alerta ativo"
+
+            fired = 0
+            for alert, product, user in rows:
+                price = await _latest_price(session, product.id)
+                if price is None or price >= alert.target_price:
+                    continue
+
+                adapter = adapters_by_name.get(product.store.value)
+                link = product.url
+                user_sub = f"a{alert.id}u{user.tg_id}"
+                if adapter is not None:
+                    offer = RawOffer(
+                        store=product.store.value,
+                        external_id=product.external_id,
+                        title=product.title,
+                        url=product.url,
+                        image_url=product.image_url,
+                        price=price,
+                    )
+                    link = await adapter.build_affiliate_link(offer, user_sub)
+
+                text = (
+                    f"🎯 Seu alerta disparou!\n\n{product.title}\n"
+                    f"Caiu para {format_brl(price)} (seu alvo: {format_brl(alert.target_price)}).\n\n"
+                    f"{DISCLOSURE_LINE}"
+                )
+                if await try_send_dm(bot, session, user, text, affiliate_link=link, kind="price_alert"):
+                    await repo.mark_alert_triggered(session, alert)
+                    fired += 1
+
+            await session.commit()
+        return f"{fired} alertas disparados de {len(rows)} ativos"
+    finally:
+        if own_bot:
+            await bot.session.close()
 
 
 # ---------------------------------------------------------------- conversões e relatório (fase 2)

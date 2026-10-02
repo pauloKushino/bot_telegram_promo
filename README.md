@@ -30,6 +30,21 @@ Lojas (API)  →  │ collect → classify(IA) → deal engine │  a cada N min
 - **Métricas (fase 2)**: importação diária de conversões da Shopee (20:50, janela de 7 dias) e
   relatório diário ao admin por DM (21:00): posts do dia, produtos novos, vendas, comissão e top 3 posts.
 
+## Público (fase 3a — qualquer usuário no privado com o bot)
+
+| Comando/interação | Ação |
+|---|---|
+| `/start` | cadastra o usuário e abre o teclado de franquias |
+| Botão de franquia | segue/deixa de seguir (grátis: até `FREE_MAX_FOLLOWS` = 3) |
+| 🔔 "Acompanhar este item" (posts do canal) | cria alerta: avisa por DM se o preço cair abaixo do postado (grátis: `FREE_MAX_ALERTS` = 1 ativo) |
+| Botões -5%/-10%/-20% na DM de confirmação | ajusta o alvo do alerta |
+| `/parar` | para de receber DMs (reversible com /start) |
+| `/apagar_meus_dados` | apaga usuário, follows, alertas e logs (privacidade) |
+
+DMs respeitam limite diário por usuário (`MAX_DM_PER_USER_DAY` = 10), carregam `sub_id`
+por usuário nos links (rastreio de conversão por assinante) e quem bloqueia o bot é
+marcado e silenciado automaticamente.
+
 ## Comandos do bot (somente admins em `ADMIN_TELEGRAM_IDS`)
 
 | Comando | Ação |
@@ -107,8 +122,12 @@ até a fase 3b (webhook Stripe + Caddy).
 - **Fase 2 ✅**: `/health`, `/blacklist`, `/addkeyword`, `/removekeyword`, importação diária de
   conversões (tabela `conversions`) e relatório diário ao admin. Anti-repetição e regra de
   "menor preço em 60 dias" com prova no histórico, cobertas por testes sintéticos.
-- Fase 3: usuários/follows/alertas grátis com limites (3a), webhook Stripe teste com Caddy (3b),
-  premium R$ 9,90/mês + canal VIP via Stripe live (3c). Padrões reaproveitados do `subbotTelegram`.
+- Fase 3a ✅: usuários, seguir franquias (limite 3), alertas de preço (limite 1), botão
+  "Acompanhar este item" nos posts, DMs com sub_id por usuário, `/parar`, `/apagar_meus_dados`.
+  Validado por E2E real via userbot Telethon (9/9).
+- Fase 3b: domínio + Caddy + webhook Stripe em modo teste.
+- Fase 3c: premium R$ 9,90/mês (+ R$ 89/ano) e canal VIP via Stripe live
+  (fluxo reaproveitado do `subbotTelegram`).
 - Fase 4: Mercado Livre e Amazon (se as APIs/programas estiverem liberados).
 
 ## Estado da validação real (Fase 1 concluída)

@@ -25,10 +25,14 @@ class TelegramPublishError(Exception):
     """Falha não recuperável ao publicar (post → failed)."""
 
 
-def _keyboard(affiliate_link: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=BUTTON_TEXT, url=affiliate_link)]]
-    )
+def _keyboard(affiliate_link: str, post_id: int | None = None) -> InlineKeyboardMarkup:
+    """Botão "Ver oferta" + (fase 3a) "🔔 Acompanhar este item"."""
+    rows = [[InlineKeyboardButton(text=BUTTON_TEXT, url=affiliate_link)]]
+    if post_id is not None:
+        rows.append(
+            [InlineKeyboardButton(text="🔔 Acompanhar este item", callback_data=f"track:{post_id}")]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _safe_caption(text: str) -> str:
@@ -40,7 +44,7 @@ def _safe_caption(text: str) -> str:
 async def send_post(bot: Bot, channel_id: int, post: PostQueue, product: Product) -> int:
     """Publica e retorna o message_id. Levanta TelegramPublishError em falha."""
     caption = _safe_caption(html_decoration.quote(post.message_text))
-    markup = _keyboard(post.affiliate_link)
+    markup = _keyboard(post.affiliate_link, post_id=post.id)
 
     for _ in range(2):  # 1 tentativa + 1 retry p/ flood control
         try:

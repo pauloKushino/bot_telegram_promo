@@ -49,6 +49,33 @@ class FakeLLM:
         return self.responses.pop(0)
 
 
+class FakeBot:
+    """Bot fake p/ testar o fluxo de DMs sem rede (Telegram).
+
+    `forbidden_for`: tg_ids que "bloquearam o bot" (levanta TelegramForbiddenError).
+    """
+
+    def __init__(self, forbidden_for: set[int] | None = None):
+        self.sent: list[dict] = []
+        self.forbidden_for = forbidden_for or set()
+
+    async def send_message(self, chat_id: int, text: str, **kwargs) -> None:
+        if chat_id in self.forbidden_for:
+            from aiogram.exceptions import TelegramForbiddenError
+            from aiogram.methods import SendMessage
+
+            raise TelegramForbiddenError(
+                method=SendMessage(chat_id=chat_id, text=text),
+                message="Forbidden: bot was blocked by the user",
+            )
+        self.sent.append({"chat_id": chat_id, "text": text, "kwargs": kwargs})
+
+    class session:  # compatível com `await bot.session.close()`
+        @staticmethod
+        async def close() -> None:
+            return None
+
+
 def make_product(**overrides) -> Product:
     """Produto em memória (sem banco) com defaults que passam nos filtros."""
     defaults = dict(

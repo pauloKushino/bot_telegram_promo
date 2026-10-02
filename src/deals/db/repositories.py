@@ -17,11 +17,15 @@ from deals.db.models import (
     BlacklistTerm,
     BotSetting,
     Conversion,
+    DmLog,
+    Follow,
     Keyword,
     PostQueue,
     PostStatus,
+    PriceAlert,
     PriceHistory,
     Product,
+    User,
 )
 
 # ---------------------------------------------------------------- products
@@ -429,6 +433,195 @@ async def record_job_run(session: AsyncSession, name: str, ok: bool, detail: str
 async def get_job_runs(session: AsyncSession) -> dict:
     value = await session.scalar(select(BotSetting.value).where(BotSetting.key == SETTING_JOB_RUNS))
     return json.loads(value) if value else {}
+
+
+# ---------------------------------------------------------------- usuários / follows / alertas (fase 3a)
+
+
+def normalize_franchise(name: str) -> str:
+    """Forma canônica p/ comparar follows com a franquia classificada pela IA."""
+    return " ".join(name.strip().lower().split())
+
+
+async def get_or_create_user(session: AsyncSession, tg_id: int, username: str | None, full_name: str) -> User:
+    """Registra no /start. Reativa quem volta (desfaz /parar e bloqueio anterior)."""
+    user = await session.scalar(select(User).where(User.tg_id == tg_id))
+    if user is not None:
+        user.username = username
+        user.full_name = full_name
+        user.is_active = True
+        user.dm_blocked = False
+        await session.flush()
+        return user
+    user = User(tg_id=tg_id, username=username, full_name=full_name)
+    session.add(user)
+    await session.flush()
+    return user
+
+
+async def get_user_by_tg(session: AsyncSession, tg_id: int) -> User | None:
+    return await session.scalar(select(User).where(User.tg_id == tg_id))
+
+
+async def deactivate_user(session: AsyncSession, tg_id: int) -> bool:
+    result = await session.execute(
+        update(User).where(User.tg_id == tg_id).values(is_active=False)
+    )
+    await session.flush()
+    return (result.rowcount or 0) > 0
+
+
+async def mark_user_blocked(session: AsyncSession, tg_id: int) -> None:
+    await session.execute(update(User).where(User.tg_id == tg_id).values(dm_blocked=True))
+    await session.flush()
+
+
+async def delete_user_data(session: AsyncSession, tg_id: int) -> bool:
+    """/apagar_meus_dados: remove usuário + follows + alertas + logs (cascade)."""
+    user = await get_user_by_tg(session, tg_id)
+    if user is None:
+        return False
+    await session.delete(user)
+    await session.flush()
+    return True
+
+
+async def list_available_franchises(session: AsyncSession, limit: int = 25) -> list[str]:
+    """Franquias distintas vistas em produtos classificados como anime merch."""
+    rows = await session.scalars(
+        select(func.distinct(Product.franchise))
+        .where(Product.is_anime_merch.is_(True), Product.franchise.is_not(None))
+        .order_by(Product.franchise)
+        .limit(limit)
+    )
+    return [r for r in rows if r]
+
+
+async def get_user_follows(session: AsyncSession, user_id: int) -> list[Follow]:
+    result = await session.scalars(
+        select(Follow).where(Follow.user_id == user_id, Follow.active.is_(True)).order_by(Follow.franchise)
+    )
+    return list(result)
+
+
+async def count_active_follows(session: AsyncSession, user_id: int) -> int:
+    return (
+        await session.scalar(
+            select(func.count(Follow.id)).where(Follow.user_id == user_id, Follow.active.is_(True))
+        )
+    ) or 0
+
+
+async def toggle_follow(
+    session: AsyncSession, user_id: int, franchise: str, max_free: int
+) -> tuple[bool, str]:
+    """Alterna seguir/deixar de seguir. Retorna (agora_segue, mensagem_para_o_usuário)."""
+    fr = normalize_franchise(franchise)
+    existing = await session.scalar(
+        select(Follow).where(Follow.user_id == user_id, Follow.franchise == fr)
+    )
+    if existing is not None and existing.active:
+        existing.active = False
+        await session.flush()
+        return False, f"Você deixou de seguir {franchise}."
+
+    count = await count_active_follows(session, user_id)
+    if count >= max_free:
+        return False, (
+            f"Limite do plano grátis: {max_free} franquias. "
+            "Deixe de seguir outra — ou aguarde o plano premium 😉"
+        )
+
+    if existing is not None:
+        existing.active = True
+    else:
+        session.add(Follow(user_id=user_id, franchise=fr, active=True))
+    await session.flush()
+    return True, f"Agora você segue {franchise}! Te aviso por aqui quando sair oferta. 🔔"
+
+
+async def get_followers_of_franchise(session: AsyncSession, franchise: str) -> list[User]:
+    fr = normalize_franchise(franchise)
+    result = await session.scalars(
+        select(User)
+        .join(Follow, Follow.user_id == User.id)
+        .where(
+            Follow.franchise == fr,
+            Follow.active.is_(True),
+            User.is_active.is_(True),
+            User.dm_blocked.is_(False),
+        )
+    )
+    return list(result)
+
+
+async def count_active_alerts(session: AsyncSession, user_id: int) -> int:
+    return (
+        await session.scalar(
+            select(func.count(PriceAlert.id)).where(
+                PriceAlert.user_id == user_id, PriceAlert.triggered_at.is_(None)
+            )
+        )
+    ) or 0
+
+
+async def upsert_price_alert(
+    session: AsyncSession, user_id: int, product_id: int, target_price: Decimal, max_free: int
+) -> tuple[PriceAlert | None, str]:
+    """Cria (ou atualiza o alvo de) alerta. Respeita o limite free."""
+    existing = await session.scalar(
+        select(PriceAlert).where(
+            PriceAlert.user_id == user_id,
+            PriceAlert.product_id == product_id,
+            PriceAlert.triggered_at.is_(None),
+        )
+    )
+    if existing is not None:
+        existing.target_price = target_price
+        await session.flush()
+        return existing, "updated"
+
+    if await count_active_alerts(session, user_id) >= max_free:
+        return None, "limit"
+
+    alert = PriceAlert(user_id=user_id, product_id=product_id, target_price=target_price)
+    session.add(alert)
+    await session.flush()
+    return alert, "created"
+
+
+async def get_active_alerts_with_products(session: AsyncSession) -> list[tuple[PriceAlert, Product, User]]:
+    """Alertas não disparados de usuários ativos, já com produto e usuário."""
+    result = await session.execute(
+        select(PriceAlert, Product, User)
+        .join(Product, Product.id == PriceAlert.product_id)
+        .join(User, User.id == PriceAlert.user_id)
+        .where(
+            PriceAlert.triggered_at.is_(None),
+            Product.active.is_(True),
+            User.is_active.is_(True),
+            User.dm_blocked.is_(False),
+        )
+    )
+    return [(r[0], r[1], r[2]) for r in result.all()]
+
+
+async def mark_alert_triggered(session: AsyncSession, alert: PriceAlert) -> None:
+    alert.triggered_at = datetime.now(UTC)
+    await session.flush()
+
+
+async def count_dms_since(session: AsyncSession, user_id: int, since: datetime) -> int:
+    return (
+        await session.scalar(
+            select(func.count(DmLog.id)).where(DmLog.user_id == user_id, DmLog.sent_at >= since)
+        )
+    ) or 0
+
+
+async def log_dm(session: AsyncSession, user_id: int, kind: str, post_id: int | None = None) -> None:
+    session.add(DmLog(user_id=user_id, kind=kind, post_id=post_id))
+    await session.flush()
 
 
 # ---------------------------------------------------------------- estado do bot (pausa) e stats

@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     MAX_RADAR_POSTS_PER_DAY: int = 2
     LOG_LEVEL: str = "INFO"
 
+    # Fase 3a — limites do plano grátis (premium chega na fase 3c)
+    FREE_MAX_FOLLOWS: int = 3
+    FREE_MAX_ALERTS: int = 1
+    MAX_DM_PER_USER_DAY: int = 10
+
     # Monitoramento externo (opcional): URL do healthchecks.io — o worker dá ping
     # a cada ciclo; se ficar mudo, o healthchecks alerta por e-mail.
     HEALTHCHECK_PING_URL: str = ""

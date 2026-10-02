@@ -21,6 +21,7 @@ from deals.db.base import AsyncSessionLocal
 from deals.logging import setup_logging
 from deals.worker.jobs import (
     build_queue_job,
+    check_alerts_job,
     classify_job,
     collect_job,
     daily_report_job,
@@ -31,6 +32,7 @@ from deals.worker.jobs import (
 CLASSIFY_INTERVAL_MIN = 5
 BUILD_QUEUE_INTERVAL_MIN = 10
 PUBLISH_INTERVAL_MIN = 1
+CHECK_ALERTS_INTERVAL_MIN = 10
 IMPORT_CONVERSIONS_HOUR = 20  # 20:50
 IMPORT_CONVERSIONS_MIN = 50
 DAILY_REPORT_HOUR = 21  # 21:00, logo após a importação
@@ -91,6 +93,9 @@ async def main() -> None:
                       args=["import_conversions", import_conversions_job], id="import_conversions")
     scheduler.add_job(_safe, "cron", hour=DAILY_REPORT_HOUR, minute=DAILY_REPORT_MIN,
                       args=["daily_report", daily_report_job], id="daily_report")
+    scheduler.add_job(_safe, "interval", minutes=CHECK_ALERTS_INTERVAL_MIN,
+                      args=["check_alerts", check_alerts_job], id="check_alerts",
+                      max_instances=1, coalesce=True)
     scheduler.add_job(_healthcheck_ping, "interval", minutes=10, id="healthcheck_ping")
     scheduler.start()
 

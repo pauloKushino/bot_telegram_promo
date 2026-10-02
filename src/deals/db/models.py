@@ -152,6 +152,73 @@ class Conversion(Base):
     )
 
 
+class User(Base):
+    """Usuário do bot (fase 3a). Mínimo necessário (privacidade — spec doc fase 3)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    username: Mapped[str | None] = mapped_column(String(50))
+    full_name: Mapped[str | None] = mapped_column(String(100))
+    is_active: Mapped[bool] = mapped_column(  # False = /parar
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    dm_blocked: Mapped[bool] = mapped_column(  # True = usuário bloqueou o bot
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    created_at: Mapped[datetime] = mapped_column(TzDateTime, server_default=func.now(), nullable=False)
+
+
+class Follow(Base):
+    """Usuário segue uma franquia (ex.: "one piece"). Limite free: FREE_MAX_FOLLOWS."""
+
+    __tablename__ = "follows"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    franchise: Mapped[str] = mapped_column(String(200), nullable=False)  # normalizada (lower/strip)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(TzDateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (Index("ix_follows_user_franchise", "user_id", "franchise", unique=True),)
+
+
+class PriceAlert(Base):
+    """Alerta de preço-alvo num produto (limite free: FREE_MAX_ALERTS). Dispara uma vez."""
+
+    __tablename__ = "price_alerts"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
+    target_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    triggered_at: Mapped[datetime | None] = mapped_column(TzDateTime)
+    created_at: Mapped[datetime] = mapped_column(TzDateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_price_alerts_active_product",
+            "product_id",
+            postgresql_where=(triggered_at == None),  # noqa: E711
+        ),
+    )
+
+
+class DmLog(Base):
+    """Cada DM enviada pelo bot — usado p/ limite diário por usuário e auditoria."""
+
+    __tablename__ = "dm_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)  # follow_push | price_alert | aviso
+    post_id: Mapped[int | None] = mapped_column(ForeignKey("post_queue.id", ondelete="SET NULL"))
+    sent_at: Mapped[datetime] = mapped_column(TzDateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (Index("ix_dm_log_user_sent", "user_id", "sent_at"),)
+
+
 class BotSetting(Base):
     """Chave-valor simples p/ estado compartilhado entre os processos bot e worker (ex.: pausa)."""
 
