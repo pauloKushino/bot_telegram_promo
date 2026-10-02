@@ -443,8 +443,13 @@ def normalize_franchise(name: str) -> str:
     return " ".join(name.strip().lower().split())
 
 
-async def get_or_create_user(session: AsyncSession, tg_id: int, username: str | None, full_name: str) -> User:
-    """Registra no /start. Reativa quem volta (desfaz /parar e bloqueio anterior)."""
+async def get_or_create_user(
+    session: AsyncSession, tg_id: int, username: str | None, full_name: str, source: str | None = None
+) -> User:
+    """Registra no /start. Reativa quem volta (desfaz /parar e bloqueio anterior).
+
+    `source` só é gravado na CRIAÇÃO (origem do cadastro, ex.: deep link "canal").
+    """
     user = await session.scalar(select(User).where(User.tg_id == tg_id))
     if user is not None:
         user.username = username
@@ -453,7 +458,7 @@ async def get_or_create_user(session: AsyncSession, tg_id: int, username: str | 
         user.dm_blocked = False
         await session.flush()
         return user
-    user = User(tg_id=tg_id, username=username, full_name=full_name)
+    user = User(tg_id=tg_id, username=username, full_name=full_name, source=source)
     session.add(user)
     await session.flush()
     return user
@@ -627,19 +632,25 @@ async def log_dm(session: AsyncSession, user_id: int, kind: str, post_id: int | 
 # ---------------------------------------------------------------- estado do bot (pausa) e stats
 
 
-async def is_paused(session: AsyncSession) -> bool:
-    value = await session.scalar(select(BotSetting.value).where(BotSetting.key == SETTING_PAUSED))
-    return value == "1"
+async def get_setting(session: AsyncSession, key: str) -> str | None:
+    return await session.scalar(select(BotSetting.value).where(BotSetting.key == key))
 
 
-async def set_paused(session: AsyncSession, paused: bool) -> None:
-    value = "1" if paused else "0"
-    existing = await session.get(BotSetting, SETTING_PAUSED)
+async def set_setting(session: AsyncSession, key: str, value: str) -> None:
+    existing = await session.get(BotSetting, key)
     if existing is None:
-        session.add(BotSetting(key=SETTING_PAUSED, value=value))
+        session.add(BotSetting(key=key, value=value))
     else:
         existing.value = value
     await session.flush()
+
+
+async def is_paused(session: AsyncSession) -> bool:
+    return (await get_setting(session, SETTING_PAUSED)) == "1"
+
+
+async def set_paused(session: AsyncSession, paused: bool) -> None:
+    await set_setting(session, SETTING_PAUSED, "1" if paused else "0")
 
 
 async def count_active_products(session: AsyncSession) -> int:

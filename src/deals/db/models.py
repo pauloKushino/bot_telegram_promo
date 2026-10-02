@@ -161,6 +161,7 @@ class User(Base):
     tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
     username: Mapped[str | None] = mapped_column(String(50))
     full_name: Mapped[str | None] = mapped_column(String(100))
+    source: Mapped[str | None] = mapped_column(String(30))  # origem do cadastro: "canal", None etc.
     is_active: Mapped[bool] = mapped_column(  # False = /parar
         Boolean, nullable=False, default=True, server_default="true"
     )

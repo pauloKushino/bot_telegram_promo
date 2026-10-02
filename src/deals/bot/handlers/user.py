@@ -9,11 +9,12 @@ Callbacks (64 bytes máx. do Telegram):
 import hashlib
 from decimal import Decimal
 
-from aiogram import Router
-from aiogram.filters import Command, CommandStart
+from aiogram import Bot, Router
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from loguru import logger
 
+from deals.bot.channel_link import get_channel_link
 from deals.config import settings
 from deals.db import repositories as repo
 from deals.db.base import AsyncSessionLocal
@@ -28,8 +29,14 @@ def fr_hash(franchise: str) -> str:
     return hashlib.md5(repo.normalize_franchise(franchise).encode()).hexdigest()[:12]
 
 
-def franchise_keyboard(franchises: list[str], following: set[str]) -> InlineKeyboardMarkup:
+def franchise_keyboard(
+    franchises: list[str], following: set[str], channel_link: str | None = None
+) -> InlineKeyboardMarkup:
     buttons = []
+    if channel_link:
+        buttons.append(
+            [InlineKeyboardButton(text="📣 Entrar no canal de ofertas", url=channel_link)]
+        )
     for fr in franchises:
         mark = "✅ " if repo.normalize_franchise(fr) in following else ""
         buttons.append([InlineKeyboardButton(text=f"{mark}{fr}", callback_data=f"fr:{fr_hash(fr)}")])
@@ -40,39 +47,66 @@ def franchise_keyboard(franchises: list[str], following: set[str]) -> InlineKeyb
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-async def _user_keyboard(user_tg_id: int) -> InlineKeyboardMarkup:
+async def _user_keyboard(user_tg_id: int, bot: Bot) -> InlineKeyboardMarkup:
     async with AsyncSessionLocal() as session:
         franchises = await repo.list_available_franchises(session)
         user = await repo.get_user_by_tg(session, user_tg_id)
         following: set[str] = set()
         if user is not None:
             following = {f.franchise for f in await repo.get_user_follows(session, user.id)}
-    return franchise_keyboard(franchises, following)
+    try:
+        channel_link = await get_channel_link(bot)
+    except Exception:  # noqa: BLE001 - sem o link do canal, o resto do teclado continua útil
+        logger.exception("Não consegui resolver o link do canal")
+        channel_link = None
+    return franchise_keyboard(franchises, following, channel_link)
 
 
 WELCOME = (
     "👋 Bem-vindo ao AniPromo!\n\n"
     "Eu monitoro preços de mangás, figures e Blu-rays de anime na Shopee e posto no canal "
     "quando o desconto é de verdade (com histórico de preço).\n\n"
+    "📣 Use o botão abaixo para entrar no canal.\n"
     "Toque nas franquias para <b>seguir/deixar de seguir</b> e receber DM quando sair oferta "
     f"(grátis: até {settings.FREE_MAX_FOLLOWS} franquias).\n"
     f"Você também pode acompanhar o preço de um item pelo botão 🔔 nos posts do canal "
     f"(grátis: {settings.FREE_MAX_ALERTS} alerta ativo).\n\n"
-    "Comandos: /parar (parar DMs), /apagar_meus_dados (apagar tudo)."
+    "Comandos: /canal (link do canal), /parar (parar DMs), /apagar_meus_dados (apagar tudo)."
 )
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, command: CommandObject, bot: Bot) -> None:
     tg = message.from_user
     if tg is None:
         return
+    # deep link: https://t.me/<bot>?start=canal → rastreio de origem do cadastro
+    source = command.args if command.args else None
     async with AsyncSessionLocal() as session:
-        await repo.get_or_create_user(session, tg.id, tg.username, tg.full_name)
+        await repo.get_or_create_user(session, tg.id, tg.username, tg.full_name, source=source)
         await session.commit()
-    kb = await _user_keyboard(tg.id)
+    kb = await _user_keyboard(tg.id, bot)
     await message.answer(WELCOME, reply_markup=kb)
-    logger.info("Novo /start de {} ({})", tg.full_name, tg.id)
+    logger.info("Novo /start de {} ({}) source={}", tg.full_name, tg.id, source)
+
+
+@router.message(Command("canal"))
+async def cmd_canal(message: Message, bot: Bot) -> None:
+    """Manda o link de entrada do canal (público: t.me; privado: invite cacheado)."""
+    try:
+        link = await get_channel_link(bot)
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao resolver link do canal no /canal")
+        link = None
+    if link is None:
+        await message.answer("Não consegui gerar o link do canal agora. Tente de novo em instantes.")
+        return
+    await message.answer(
+        "📣 Canal de ofertas AniPromo:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Entrar no canal", url=link)]]
+        ),
+    )
 
 
 @router.callback_query(lambda c: c.data == "noop")
@@ -81,7 +115,7 @@ async def cb_noop(query: CallbackQuery) -> None:
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("fr:"))
-async def cb_toggle_follow(query: CallbackQuery) -> None:
+async def cb_toggle_follow(query: CallbackQuery, bot: Bot) -> None:
     tg = query.from_user
     wanted_hash = (query.data or "")[3:]
 
@@ -98,7 +132,7 @@ async def cb_toggle_follow(query: CallbackQuery) -> None:
         following, msg = await repo.toggle_follow(session, user.id, franchise, settings.FREE_MAX_FOLLOWS)
         await session.commit()
 
-    kb = await _user_keyboard(tg.id)
+    kb = await _user_keyboard(tg.id, bot)
     try:
         await query.message.edit_reply_markup(reply_markup=kb)
     except Exception:  # noqa: BLE001 - teclado idêntico/velho: ok ignorar

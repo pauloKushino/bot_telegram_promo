@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
     CHANNEL_ID: int
     ADMIN_TELEGRAM_IDS: list[int]
+    # usado no deep link dos posts (t.me/<username>?start=canal)
+    BOT_USERNAME: str = "anipromo_bot"
 
     # Banco
     DATABASE_URL: str

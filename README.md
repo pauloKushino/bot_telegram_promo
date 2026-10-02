@@ -40,6 +40,12 @@ Lojas (API)  →  │ collect → classify(IA) → deal engine │  a cada N min
 | Botões -5%/-10%/-20% na DM de confirmação | ajusta o alvo do alerta |
 | `/parar` | para de receber DMs (reversible com /start) |
 | `/apagar_meus_dados` | apaga usuário, follows, alertas e logs (privacidade) |
+| `/canal` | bot manda o link de entrada do canal (invite cacheado p/ canal privado) |
+
+Cada post do canal leva 3 botões: **Ver oferta** (afiliado), **🔔 Acompanhar este item**
+(alerta one-shot) e **📣 Receber alertas no privado** (deep link `t.me/<bot>?start=canal` —
+abre a DM do bot sem precisar de /start prévio e grava a origem `users.source` para sabermos
+quantos cadastros vêm do canal).
 
 DMs respeitam limite diário por usuário (`MAX_DM_PER_USER_DAY` = 10), carregam `sub_id`
 por usuário nos links (rastreio de conversão por assinante) e quem bloqueia o bot é

@@ -14,6 +14,7 @@ import sys
 from telethon import TelegramClient
 
 from deals.config import settings
+from deals.db.base import AsyncSessionLocal
 
 BOT_USERNAME = "anipromo_bot"
 CHANNEL_ID = settings.CHANNEL_ID
@@ -51,13 +52,55 @@ async def main() -> int:
     last_dm = (await client.get_messages(BOT_USERNAME, limit=1))[0]
     watermark = last_dm.id if last_dm else 0
 
-    # 1) /start com teclado de franquias
-    await client.send_message(BOT_USERNAME, "/start")
+    # 1) /start via deep link do canal + teclado (franquias + botão do canal)
+    await client.send_message(BOT_USERNAME, "/start canal")
     welcome = await wait_dm(client, watermark)
     check("/start responde boas-vindas", "Bem-vindo" in welcome)
     msgs = await client.get_messages(BOT_USERNAME, limit=1)
     teclado = msgs[0].buttons if msgs else None
     check("/start tem teclado de franquias", bool(teclado))
+    botao_canal = None
+    if teclado:
+        for row in teclado:
+            for b in row:
+                if b.url and "t.me/" in b.url:
+                    botao_canal = b
+    check("teclado tem botão de link do canal", botao_canal is not None)
+
+    # origem do cadastro gravada ("canal" do deep link)
+    from sqlalchemy import func, select
+
+    from deals.db.models import Follow
+    from deals.db.models import User as DbUser
+
+    async with AsyncSessionLocal() as s:
+        dbuser = await s.scalar(select(DbUser).where(DbUser.tg_id == me.id))
+        n_follows = (
+            await s.scalar(
+                select(func.count(Follow.id)).where(
+                    Follow.user_id == (dbuser.id if dbuser else -1), Follow.active.is_(True)
+                )
+            )
+        ) or 0
+    print(f"  debug: dbuser.source={dbuser and dbuser.source!r} follows_ativos={n_follows}")
+    check("source 'canal' gravado no usuário", dbuser is not None and dbuser.source == "canal")
+
+    # 1b) comando /canal manda o link do canal
+    ultimas = await client.get_messages(BOT_USERNAME, limit=1)
+    wm_canal = ultimas[0].id if ultimas else watermark
+    await client.send_message(BOT_USERNAME, "/canal")
+    tem_link = False
+    for _ in range(25):
+        novas = await client.get_messages(BOT_USERNAME, limit=3)
+        alvo = next(
+            (m for m in novas if m.id > wm_canal and m.sender_id != me.id), None
+        )
+        if alvo is not None:
+            btn = alvo.buttons
+            tem_link = bool(btn) and any(bool(b.url) for r in btn for b in r)
+            break
+        await asyncio.sleep(1)
+    check("/canal responde com link", tem_link)
 
     # 2) seguir franquia (clica no botão com Jujutsu se houver, senão no 1º)
     alvo = None

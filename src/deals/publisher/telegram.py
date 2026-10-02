@@ -15,6 +15,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.text_decorations import html_decoration
 from loguru import logger
 
+from deals.config import settings
 from deals.db.models import PostQueue, Product
 
 CAPTION_LIMIT = 1024
@@ -26,11 +27,23 @@ class TelegramPublishError(Exception):
 
 
 def _keyboard(affiliate_link: str, post_id: int | None = None) -> InlineKeyboardMarkup:
-    """Botão "Ver oferta" + (fase 3a) "🔔 Acompanhar este item"."""
+    """Botões do post: oferta + acompanhar (callback) + deep link p/ o bot.
+
+    O botão de URL abre a DM do bot direto (não precisa de /start prévio) e
+    leva o parâmetro start=canal para rastrear a origem do cadastro.
+    """
     rows = [[InlineKeyboardButton(text=BUTTON_TEXT, url=affiliate_link)]]
     if post_id is not None:
         rows.append(
             [InlineKeyboardButton(text="🔔 Acompanhar este item", callback_data=f"track:{post_id}")]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📣 Receber alertas no privado",
+                    url=f"https://t.me/{settings.BOT_USERNAME}?start=canal",
+                )
+            ]
         )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
